@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  pg-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pg-mcp
+    ports:
+      - "8000:8000"
+    environment:
+      - LOG_LEVEL=DEBUG
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # For development: mount app directory to enable hot-reloading
+      - ./app:/app/app
+    restart: unless-stopped
+    networks:
+      - pg-mcp-network
+
+networks:
+  pg-mcp-network:
+    driver: bridge
