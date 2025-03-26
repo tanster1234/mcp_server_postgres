@@ -1,16 +1,19 @@
-# test.py
+# server_test.py
 import asyncio
 import httpx
 import json
+import sys
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 
-async def run():
+async def run(connection_string):
     # Assuming your server is running on localhost:8000
     server_url = "http://localhost:8000/sse"  
     
     try:
         print(f"Connecting to MCP server at {server_url}...")
+        if connection_string:
+            print(f"Using database connection: {connection_string[:10]}...")
         
         # Create the SSE client context manager
         async with sse_client(url=server_url) as streams:
@@ -47,7 +50,10 @@ async def run():
                         print("\nTesting database connection with pg_query tool...")
                         result = await session.call_tool(
                             "pg_query", 
-                            {"query": "SELECT version() AS version"}
+                            {
+                                "query": "SELECT version() AS version",
+                                "connection_string": connection_string
+                            }
                         )
                         
                         # Extract version from TextContent
@@ -73,4 +79,6 @@ async def run():
         print(f"Error: {type(e).__name__}: {e}")
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    # Get database connection string from command line argument
+    connection_string = sys.argv[1] if len(sys.argv) > 1 else None
+    asyncio.run(run(connection_string))

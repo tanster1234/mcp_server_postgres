@@ -3,9 +3,9 @@ from mcp.server.fastmcp.utilities.logging import get_logger
 
 logger = get_logger("pg-mcp.resources.schema")
 
-async def get_tables(db):
+async def get_tables(db, connection_string):
     """Get all tables in the database with their descriptions."""
-    async with db.get_connection() as conn:
+    async with db.get_connection(connection_string) as conn:
         return await conn.fetch("""
             SELECT 
                 t.table_schema,
@@ -18,9 +18,9 @@ async def get_tables(db):
             ORDER BY t.table_schema, t.table_name
         """)
 
-async def get_columns(db, schema, table):
+async def get_columns(db, schema, table, connection_string):
     """Get all columns for a table with their descriptions."""
-    async with db.get_connection() as conn:
+    async with db.get_connection(connection_string) as conn:
         return await conn.fetch("""
             SELECT
                 c.column_name,
@@ -45,12 +45,16 @@ def register_schema_resources(mcp, db):
     """Register database schema resources with the MCP server."""
     logger.debug("Registering schema resources")
     
-    @mcp.resource("pg-schema://tables")
-    async def list_tables():
-        """List all tables in the database with their descriptions."""
-        return await get_tables(db)
     
-    @mcp.resource("pg-schema://tables/{schema}/{table}/columns")
-    async def get_table_columns(schema, table):
+    @mcp.resource("postgresql://{connection_string}/tables")
+    async def list_tables(connection_string):
+        """List all tables in the database with their descriptions."""
+        full_connection_string = f"postgresql://{connection_string}"
+        return await get_tables(db, full_connection_string)
+    
+    @mcp.resource("postgresql://{connection_string}/tables/{schema}/{table}/columns")
+    async def get_table_columns(connection_string, schema, table):
         """Get columns for a specific table with their descriptions."""
-        return await get_columns(db, schema, table)
+        full_connection_string = f"postgresql://{connection_string}"
+        return await get_columns(db, schema, table, full_connection_string)
+    
