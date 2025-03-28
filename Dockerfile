@@ -21,4 +21,4 @@ WORKDIR /app
 RUN uv sync --frozen
 
 # Run the application
-CMD ["uv", "run", "-m", "app.server"]
+CMD ["uv", "run", "-m", "server.app"]
