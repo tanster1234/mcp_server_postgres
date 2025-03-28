@@ -19,11 +19,13 @@ from server.config import mcp
 # Import registration functions
 from server.resources.schema import register_schema_resources
 from server.resources.data import register_data_resources
+from server.resources.extensions import register_extension_resources
 from server.tools.query import register_query_tool
 
 # Register tools and resources with the MCP server
-register_schema_resources()  # Schema-related resources (schemas, tables, columns)
-register_data_resources()    # Data-related resources (sample, rowcount, etc.)
+register_schema_resources()   # Schema-related resources (schemas, tables, columns)
+register_extension_resources()
+register_data_resources()     # Data-related resources (sample, rowcount, etc.)
 register_query_tool()
 
 if __name__ == "__main__":

@@ -1,6 +1,5 @@
 # server/resources/data.py
 from server.config import mcp
-from mcp.server.fastmcp import Context
 from mcp.server.fastmcp.utilities.logging import get_logger
 from server.tools.query import execute_query
 
