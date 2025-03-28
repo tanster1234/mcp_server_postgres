@@ -1,9 +1,10 @@
-# test_new.py
+# test.py
 import asyncio
 import httpx
 import json
 import sys
 import urllib.parse
+import uuid
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 
@@ -104,9 +105,6 @@ async def run(connection_string: str | None):
                         
                         # At this point, the connection has been registered in the server
                         # We need to determine the conn_id, which is a deterministic UUID based on the connection
-                        import uuid
-                        import urllib.parse
-                        
                         # Parse the connection string to extract netloc and path
                         parsed = urllib.parse.urlparse(clean_connection)
                         # The path typically starts with a slash
@@ -121,14 +119,74 @@ async def run(connection_string: str | None):
                         print(f"Resource path: {resource_path}")
                         
                         # Read the resource
-                        tables_result = await session.read_resource(resource_path)
-                        if tables_result:
-                            print(f"Successfully retrieved tables - found {len(tables_result)} tables")
+                        response = await session.read_resource(resource_path)
+                        
+                        # Process the response based on the actual structure
+                        if hasattr(response, 'contents') and response.contents:
+                            content = response.contents[0]
+                            if hasattr(content, 'text'):
+                                tables_data = json.loads(content.text)
+                                print(f"Successfully retrieved tables - found {len(tables_data)} tables")
+                                # Print first few tables as example
+                                for i, table in enumerate(tables_data[:3]):
+                                    print(f"  - {table.get('table_schema')}.{table.get('table_name')}")
+                                    if i >= 2 and len(tables_data) > 3:
+                                        print(f"  ... and {len(tables_data) - 3} more")
+                                        break
+                            else:
+                                print("Content doesn't have 'text' attribute")
                         else:
-                            print("No tables found or resource returned empty result")
+                            print("No contents found in the response")
+                            
+                        # Test getting columns for a specific table if tables were obtained
+                        if hasattr(response, 'contents') and response.contents:
+                            content = response.contents[0]
+                            if hasattr(content, 'text'):
+                                tables_data = json.loads(content.text)
+                                if tables_data:
+                                    # Take the first table as a sample
+                                    sample_table = tables_data[0]
+                                    schema_name = sample_table.get('table_schema')
+                                    table_name = sample_table.get('table_name')
+                                    
+                                    print(f"\nTesting column access for {schema_name}.{table_name}...")
+                                    columns_resource = f"pgmcp://{conn_id}/tables/{schema_name}/{table_name}/columns"
+                                    columns_response = await session.read_resource(columns_resource)
+                                    
+                                    if hasattr(columns_response, 'contents') and columns_response.contents:
+                                        content = columns_response.contents[0]
+                                        if hasattr(content, 'text'):
+                                            columns_data = json.loads(content.text)
+                                            print(f"Successfully retrieved columns - found {len(columns_data)} columns")
+                                            # Print first few columns as example
+                                            for i, col in enumerate(columns_data[:3]):
+                                                print(f"  - {col.get('column_name')} ({col.get('data_type')})")
+                                                if i >= 2 and len(columns_data) > 3:
+                                                    print(f"  ... and {len(columns_data) - 3} more")
+                                                    break
+                                        else:
+                                            print("No text content in columns response")
+                                    else:
+                                        print("No columns found or resource returned empty result")
+                                        
+                                    # Test sample data for the same table
+                                    print(f"\nTesting sample data access for {schema_name}.{table_name}...")
+                                    sample_resource = f"pgmcp://{conn_id}/tables/{schema_name}/{table_name}/sample"
+                                    sample_response = await session.read_resource(sample_resource)
+                                    
+                                    if hasattr(sample_response, 'contents') and sample_response.contents:
+                                        content = sample_response.contents[0]
+                                        if hasattr(content, 'text'):
+                                            sample_data = json.loads(content.text)
+                                            print(f"Successfully retrieved sample data - found {len(sample_data)} rows")
+                                            # Don't print the actual rows to avoid sensitive data
+                                            print("  (Sample data retrieved successfully)")
+                                        else:
+                                            print("No text content in sample data response")
+                                    else:
+                                        print("No sample data found or resource returned empty result")
                     except Exception as e:
-                        print(f"Error accessing tables resource: {e}")
-
+                        print(f"Error accessing resources: {e}")
 
     except httpx.HTTPStatusError as e:
         print(f"HTTP Error: {e}")

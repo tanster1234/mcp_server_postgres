@@ -20,8 +20,15 @@ async def execute_query(query: str, conn_id: str, params=None, ctx=None):
     """
     
     # Access the database from the request context
-    db = ctx.request_context.lifespan_context["db"]
-    
+    # Access the database from either context or MCP state
+    if ctx is not None and hasattr(ctx, 'request_context'):
+        db = ctx.request_context.lifespan_context["db"]
+    else:
+        from server.config import mcp
+        db = mcp.state["db"]
+        if db is None:
+            raise ValueError("Database connection not available in context or MCP state.")
+        
     logger.info(f"Executing query on connection ID {conn_id}: {query}")
     
     async with db.get_connection(conn_id) as conn:
