@@ -3,8 +3,6 @@ import asyncio
 import httpx
 import json
 import sys
-import urllib.parse
-import uuid
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 
@@ -51,221 +49,284 @@ async def run(connection_string: str | None):
                 templates_response = await session.list_resource_templates()
                 print(f"Available resource templates: {templates_response}")
 
-                # Try a database connection test if pg_query tool is available and connection_string provided
-                if connection_string and any(tool.name == 'pg_query' for tool in tools):
+                # Test with a connection if provided
+                if connection_string:
+                    # Check if required tools are available
+                    has_connect = any(tool.name == 'connect' for tool in tools)
+                    has_pg_query = any(tool.name == 'pg_query' for tool in tools)
+                    
+                    if not has_connect:
+                        print("\nERROR: 'connect' tool is not available on the server")
+                        return
+                    
+                    if not has_pg_query:
+                        print("\nERROR: 'pg_query' tool is not available on the server")
+                        return
+                        
                     try:
                         # Use the cleaned connection string
                         clean_connection = connection_string.strip()
                         
-                        print("\nTesting database connection with pg_query tool...")
-                        result = await session.call_tool(
+                        # First, register the connection to get a conn_id
+                        print("\nRegistering connection with 'connect' tool...")
+                        connect_result = await session.call_tool(
+                            "connect", 
+                            {
+                                "connection_string": clean_connection
+                            }
+                        )
+                        
+                        # Extract conn_id from the response
+                        conn_id = None
+                        if hasattr(connect_result, 'content') and connect_result.content:
+                            content = connect_result.content[0]
+                            if hasattr(content, 'text'):
+                                try:
+                                    result_data = json.loads(content.text)
+                                    conn_id = result_data.get('conn_id')
+                                    print(f"Successfully connected with connection ID: {conn_id}")
+                                except json.JSONDecodeError:
+                                    print(f"Error parsing connect result: {content.text[:100]}")
+                        
+                        if not conn_id:
+                            print("Failed to get connection ID from connect tool")
+                            return
+                        
+                        # Test pg_query using the conn_id
+                        print("\nTesting 'pg_query' tool with connection ID...")
+                        query_result = await session.call_tool(
                             "pg_query", 
                             {
                                 "query": "SELECT version() AS version",
-                                "connection_string": clean_connection
+                                "conn_id": conn_id
                             }
                         )
                         
-                        # Extract version from TextContent
-                        if hasattr(result, 'content') and result.content:
-                            content = result.content[0]
+                        # Process the query result
+                        if hasattr(query_result, 'content') and query_result.content:
+                            content = query_result.content[0]
                             if hasattr(content, 'text'):
-                                # Safely parse JSON
                                 try:
                                     version_data = json.loads(content.text)
                                     if isinstance(version_data, list) and len(version_data) > 0:
-                                        print(f"Database connection successful: {version_data[0].get('version', 'Unknown')}")
+                                        print(f"Query executed successfully: {version_data[0].get('version', 'Unknown')}")
                                     else:
-                                        print(f"Database connection successful: {version_data.get('version', 'Unknown')}")
+                                        print(f"Query executed successfully: {version_data}")
                                 except json.JSONDecodeError:
-                                    print(f"Database query succeeded but returned non-JSON response: {content.text[:100]}")
+                                    print(f"Error parsing query result: {content.text[:100]}")
                             else:
-                                print(f"Database connection successful, but version info not available")
+                                print("Query executed but text content not available")
                         else:
-                            print("Database query executed but returned no content")
-                    except Exception as e:
-                        print(f"Database connection test failed: {e}")
-                elif connection_string:
-                    print("\nThe pg_query tool is not available on the server")
-                else:
-                    print("\nNo connection string provided, skipping database connection test")
-
-                # Also test a resource if connection_string is provided
-                if connection_string:
-                    try:
-                        # First, we need to register the connection to get a conn_id
-                        print("\nRegistering connection string to get conn_id...")
-                        result = await session.call_tool(
-                            "pg_query", 
-                            {
-                                "query": "SELECT 1",  # Simple query just to register the connection
-                                "connection_string": clean_connection
-                            }
-                        )
+                            print("Query executed but no content returned")
                         
-                        # At this point, the connection has been registered in the server
-                        # We need to determine the conn_id, which is a deterministic UUID based on the connection
-                        # Parse the connection string to extract netloc and path
-                        parsed = urllib.parse.urlparse(clean_connection)
-                        # The path typically starts with a slash
-                        connection_id_string = parsed.netloc + parsed.path
-                        # Create a Version 5 UUID (same algorithm as in your Database class)
-                        conn_id = str(uuid.uuid5(uuid.NAMESPACE_URL, connection_id_string))
+                        # Test pg_explain if available
+                        has_pg_explain = any(tool.name == 'pg_explain' for tool in tools)
+                        if has_pg_explain:
+                            print("\nTesting 'pg_explain' tool...")
+                            explain_result = await session.call_tool(
+                                "pg_explain", 
+                                {
+                                    "query": "SELECT version()",
+                                    "conn_id": conn_id
+                                }
+                            )
+                            
+                            if hasattr(explain_result, 'content') and explain_result.content:
+                                content = explain_result.content[0]
+                                if hasattr(content, 'text'):
+                                    try:
+                                        explain_data = json.loads(content.text)
+                                        print(f"EXPLAIN query executed successfully. Result contains {len(explain_data)} rows.")
+                                        # Pretty print a snippet of the execution plan
+                                        print(json.dumps(explain_data, indent=2)[:500] + "...")
+                                    except json.JSONDecodeError:
+                                        print(f"Error parsing EXPLAIN result: {content.text[:100]}")
                         
-                        print(f"Calculated connection ID: {conn_id}")
+                        # Test resources with the conn_id
+                        print("\nTesting schema resources with connection ID...")
+                        schema_resource = f"pgmcp://{conn_id}/schemas"
+                        schema_response = await session.read_resource(schema_resource)
                         
-                        # Test the schemas resource
-                        print("\nTesting schemas resource...")
-                        resource_path = f"pgmcp://{conn_id}/schemas"
-                        print(f"Resource path: {resource_path}")
-                        
-                        # Read the resource - handle both 'content' and 'contents' attributes
-                        response = await session.read_resource(resource_path)
-                        
-                        # Get content regardless of attribute name
-                        # the MCP Python SDK responses with a contents attribute for resource endpoints
-                        # and a content attribute for tool endpoints
+                        # Process schema response
                         response_content = None
-                        if hasattr(response, 'content') and response.content:
-                            response_content = response.content
-                        elif hasattr(response, 'contents') and response.contents:
-                            response_content = response.contents
+                        if hasattr(schema_response, 'content') and schema_response.content:
+                            response_content = schema_response.content
+                        elif hasattr(schema_response, 'contents') and schema_response.contents:
+                            response_content = schema_response.contents
                         
-                        # Process the response
                         if response_content:
                             content_item = response_content[0]
                             if hasattr(content_item, 'text'):
-                                schemas_data = json.loads(content_item.text)
-                                print(f"Successfully retrieved schemas - found {len(schemas_data)} schemas")
-                                # Print first few schemas as example
-                                for i, schema in enumerate(schemas_data[:3]):
-                                    print(f"  - {schema.get('schema_name')}")
-                                    if i >= 2 and len(schemas_data) > 3:
-                                        print(f"  ... and {len(schemas_data) - 3} more")
-                                        break
-                                
-                                # If we have schemas, test a schema with tables
-                                if schemas_data:
-                                    # Try schemas until we find one with tables
-                                    for schema_idx, schema in enumerate(schemas_data[:5]):  # Try up to 5 schemas
+                                try:
+                                    schemas_data = json.loads(content_item.text)
+                                    print(f"Successfully retrieved {len(schemas_data)} schemas")
+                                    
+                                    # Print first few schemas
+                                    for i, schema in enumerate(schemas_data[:3]):
+                                        schema_name = schema.get('schema_name')
+                                        print(f"  - {schema_name}")
+                                        if i >= 2 and len(schemas_data) > 3:
+                                            print(f"  ... and {len(schemas_data) - 3} more")
+                                            break
+                                    
+                                    # If we have schemas, test extensions resource
+                                    if schemas_data and len(schemas_data) > 0:
+                                        schema_name = schemas_data[0].get('schema_name')
+                                        print(f"\nTesting extensions for schema '{schema_name}'...")
+                                        extensions_resource = f"pgmcp://{conn_id}/schemas/{schema_name}/extensions"
+                                        
+                                        try:
+                                            extensions_response = await session.read_resource(extensions_resource)
+                                            
+                                            # Process extensions response
+                                            ext_content = None
+                                            if hasattr(extensions_response, 'content') and extensions_response.content:
+                                                ext_content = extensions_response.content
+                                            elif hasattr(extensions_response, 'contents') and extensions_response.contents:
+                                                ext_content = extensions_response.contents
+                                            
+                                            if ext_content:
+                                                content_item = ext_content[0]
+                                                if hasattr(content_item, 'text'):
+                                                    extensions_data = json.loads(content_item.text)
+                                                    print(f"Successfully retrieved {len(extensions_data)} extensions")
+                                                    
+                                                    # Print extensions and check for context
+                                                    for ext in extensions_data:
+                                                        has_context = ext.get('context_available', False)
+                                                        context_flag = " (has context)" if has_context else ""
+                                                        print(f"  - {ext.get('name')} v{ext.get('version')}{context_flag}")
+                                                        
+                                                        # If extension has context, test getting it
+                                                        if has_context:
+                                                            ext_name = ext.get('name')
+                                                            print(f"\nFetching context for extension '{ext_name}'...")
+                                                            context_resource = f"pgmcp://{conn_id}/schemas/{schema_name}/extensions/{ext_name}"
+                                                            
+                                                            try:
+                                                                context_response = await session.read_resource(context_resource)
+                                                                
+                                                                ctx_content = None
+                                                                if hasattr(context_response, 'content') and context_response.content:
+                                                                    ctx_content = context_response.content
+                                                                elif hasattr(context_response, 'contents') and context_response.contents:
+                                                                    ctx_content = context_response.contents
+                                                                
+                                                                if ctx_content:
+                                                                    content_item = ctx_content[0]
+                                                                    if hasattr(content_item, 'text'):
+                                                                        try:
+                                                                            context_data = content_item.text
+                                                                            if isinstance(context_data, str) and context_data.strip():
+                                                                                print(f"Retrieved context information for {ext_name}")
+                                                                                # Don't print the whole context, just confirm it exists
+                                                                                yaml_data = json.loads(context_data)
+                                                                                print(f"Context contains sections: {', '.join(yaml_data.keys())}")
+                                                                            else:
+                                                                                print(f"Empty context received for {ext_name}")
+                                                                        except json.JSONDecodeError:
+                                                                            # Might be YAML directly
+                                                                            print(f"Retrieved non-JSON context for {ext_name}")
+                                                            except Exception as e:
+                                                                print(f"Error fetching extension context: {e}")
+                                        except Exception as e:
+                                            print(f"Error fetching extensions: {e}")
+                                                
+                                    # Find a schema with tables to test table resources
+                                    for schema_idx, schema in enumerate(schemas_data[:3]):
                                         schema_name = schema.get('schema_name')
                                         
-                                        print(f"\nTesting tables access for schema {schema_name}...")
+                                        print(f"\nTesting tables for schema '{schema_name}'...")
                                         tables_resource = f"pgmcp://{conn_id}/schemas/{schema_name}/tables"
                                         tables_response = await session.read_resource(tables_resource)
                                         
-                                        # Get content regardless of attribute name
+                                        # Process tables response
                                         tables_content = None
                                         if hasattr(tables_response, 'content') and tables_response.content:
                                             tables_content = tables_response.content
                                         elif hasattr(tables_response, 'contents') and tables_response.contents:
                                             tables_content = tables_response.contents
                                         
-                                        # Process the tables response
                                         if tables_content:
                                             content_item = tables_content[0]
                                             if hasattr(content_item, 'text'):
                                                 tables_data = json.loads(content_item.text)
-                                                print(f"Successfully retrieved tables - found {len(tables_data)} tables")
+                                                print(f"Found {len(tables_data)} tables in schema '{schema_name}'")
                                                 
-                                                # Break out of the loop if we found tables
-                                                if tables_data:
-                                                    # Print first few tables as example
+                                                if tables_data and len(tables_data) > 0:
+                                                    # Print first few tables
                                                     for i, table in enumerate(tables_data[:3]):
-                                                        print(f"  - {table.get('table_name')}")
+                                                        table_name = table.get('table_name')
+                                                        print(f"  - {table_name}")
                                                         if i >= 2 and len(tables_data) > 3:
                                                             print(f"  ... and {len(tables_data) - 3} more")
                                                             break
                                                     
-                                                    # Take the first table as a sample
-                                                    first_table = tables_data[0]
-                                                    table_name = first_table.get('table_name')
+                                                    # Test table details for first table
+                                                    table_name = tables_data[0].get('table_name')
+                                                    print(f"\nTesting columns for table '{schema_name}.{table_name}'...")
                                                     
-                                                    # Test columns for this table
-                                                    print(f"\nTesting column access for {schema_name}.{table_name}...")
                                                     columns_resource = f"pgmcp://{conn_id}/schemas/{schema_name}/tables/{table_name}/columns"
                                                     columns_response = await session.read_resource(columns_resource)
                                                     
-                                                    # Get content regardless of attribute name
-                                                    columns_content = None
+                                                    # Process columns response
+                                                    cols_content = None
                                                     if hasattr(columns_response, 'content') and columns_response.content:
-                                                        columns_content = columns_response.content
+                                                        cols_content = columns_response.content
                                                     elif hasattr(columns_response, 'contents') and columns_response.contents:
-                                                        columns_content = columns_response.contents
+                                                        cols_content = columns_response.contents
                                                     
-                                                    # Process the columns response
-                                                    if columns_content:
-                                                        content_item = columns_content[0]
+                                                    if cols_content:
+                                                        content_item = cols_content[0]
                                                         if hasattr(content_item, 'text'):
                                                             columns_data = json.loads(content_item.text)
-                                                            print(f"Successfully retrieved columns - found {len(columns_data)} columns")
-                                                            # Print first few columns as example
+                                                            print(f"Found {len(columns_data)} columns in table '{table_name}'")
+                                                            
+                                                            # Print first few columns
                                                             for i, col in enumerate(columns_data[:3]):
-                                                                print(f"  - {col.get('column_name')} ({col.get('data_type')})")
+                                                                col_name = col.get('column_name')
+                                                                data_type = col.get('data_type')
+                                                                print(f"  - {col_name} ({data_type})")
                                                                 if i >= 2 and len(columns_data) > 3:
                                                                     print(f"  ... and {len(columns_data) - 3} more")
                                                                     break
                                                     
-                                                    # Test sample data for this table
-                                                    print(f"\nTesting sample data access for {schema_name}.{table_name}...")
-                                                    sample_resource = f"pgmcp://{conn_id}/schemas/{schema_name}/tables/{table_name}/sample"
-                                                    sample_response = await session.read_resource(sample_resource)
-                                                    
-                                                    # Get content regardless of attribute name
-                                                    sample_content = None
-                                                    if hasattr(sample_response, 'content') and sample_response.content:
-                                                        sample_content = sample_response.content
-                                                    elif hasattr(sample_response, 'contents') and sample_response.contents:
-                                                        sample_content = sample_response.contents
-                                                    
-                                                    # Process the sample response
-                                                    if sample_content:
-                                                        content_item = sample_content[0]
-                                                        if hasattr(content_item, 'text'):
-                                                            sample_data = json.loads(content_item.text)
-                                                            print(f"Successfully retrieved sample data - found {len(sample_data)} rows")
-                                                            # Don't print the actual rows to avoid sensitive data
-                                                            print("  (Sample data retrieved successfully)")
-                                                    
-                                                    # Test rowcount for this table
-                                                    print(f"\nTesting rowcount access for {schema_name}.{table_name}...")
-                                                    rowcount_resource = f"pgmcp://{conn_id}/schemas/{schema_name}/tables/{table_name}/rowcount"
-                                                    rowcount_response = await session.read_resource(rowcount_resource)
-                                                    
-                                                    # Get content regardless of attribute name
-                                                    rowcount_content = None
-                                                    if hasattr(rowcount_response, 'content') and rowcount_response.content:
-                                                        rowcount_content = rowcount_response.content
-                                                    elif hasattr(rowcount_response, 'contents') and rowcount_response.contents:
-                                                        rowcount_content = rowcount_response.contents
-                                                    
-                                                    # Process the rowcount response
-                                                    if rowcount_content:
-                                                        content_item = rowcount_content[0]
-                                                        if hasattr(content_item, 'text'):
-                                                            rowcount_data = json.loads(content_item.text)
-                                                            if rowcount_data and len(rowcount_data) > 0:
-                                                                print(f"Successfully retrieved row count: {rowcount_data[0].get('approximate_row_count', 'Unknown')}")
-                                                    
-                                                    # We found a table and tested it, so break out of the schema loop
-                                                    break
-                                                else:
-                                                    print(f"Schema {schema_name} has no tables. Trying another schema if available.")
-                                            else:
-                                                print(f"No text content in tables response for schema {schema_name}")
-                                        else:
-                                            print(f"No tables data found for schema {schema_name}")
-                                        
-                                        # If we've tried all schemas and none had tables, report it
-                                        if schema_idx == min(4, len(schemas_data) - 1) and not tables_data:
-                                            print("No tables found in any of the tested schemas")
-                            else:
-                                print("Content doesn't have 'text' attribute")
-                        else:
-                            print("No content found in the response")
+                                                    # Test disconnect tool if available
+                                                    break  # Exit schema loop once we've found a table
+                                except json.JSONDecodeError:
+                                    print(f"Error parsing schemas: {content_item.text[:100]}")
+                        
+                        # Finally, test the disconnect tool if available
+                        has_disconnect = any(tool.name == 'disconnect' for tool in tools)
+                        if has_disconnect and conn_id:
+                            print("\nTesting 'disconnect' tool...")
+                            disconnect_result = await session.call_tool(
+                                "disconnect", 
+                                {
+                                    "conn_id": conn_id
+                                }
+                            )
                             
+                            if hasattr(disconnect_result, 'content') and disconnect_result.content:
+                                content = disconnect_result.content[0]
+                                if hasattr(content, 'text'):
+                                    try:
+                                        result_data = json.loads(content.text)
+                                        success = result_data.get('success', False)
+                                        if success:
+                                            print(f"Successfully disconnected connection {conn_id}")
+                                        else:
+                                            error = result_data.get('error', 'Unknown error')
+                                            print(f"Failed to disconnect: {error}")
+                                    except json.JSONDecodeError:
+                                        print(f"Error parsing disconnect result: {content.text[:100]}")
+                            else:
+                                print("Disconnect call completed but no result returned")
+                        
                     except Exception as e:
-                        print(f"Error accessing resources: {e}")
+                        print(f"Error during connection tests: {e}")
+                else:
+                    print("\nNo connection string provided, skipping database tests")
 
     except httpx.HTTPStatusError as e:
         print(f"HTTP Error: {e}")

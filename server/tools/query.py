@@ -44,29 +44,44 @@ async def execute_query(query: str, conn_id: str, params=None, ctx=None):
             logger.error(f"Query execution error: {e}")
             raise
 
-def register_query_tool():
+def register_query_tools():
     """Register database query tools with the MCP server."""
-    logger.debug("Registering query tool")
+    logger.debug("Registering query tools")
     
     @mcp.tool()
-    async def pg_query(query: str, connection_string: str, params=None, *, ctx: Context):
+    async def pg_query(query: str, conn_id: str, params=None):
         """
         Execute a read-only SQL query against the PostgreSQL database.
         
         Args:
             query: The SQL query to execute (must be read-only)
-            connection_string: PostgreSQL connection string (required)
+            conn_id: Connection ID previously obtained from the connect tool
             params: Parameters for the query (optional)
-            ctx: Request context (injected by the framework)
             
         Returns:
             Query results as a list of dictionaries
         """
-        # Get database from context
-        db = ctx.request_context.lifespan_context["db"]
+        # Execute the query using the connection ID 
+        return await execute_query(query, conn_id, params)
         
-        # Register the connection to get a connection ID
-        conn_id = db.register_connection(connection_string)
+    @mcp.tool()
+    async def pg_explain(query: str, conn_id: str, params=None):
+        """
+        Execute an EXPLAIN (FORMAT JSON) query to get PostgreSQL execution plan.
         
-        # Execute the query using the connection ID
-        return await execute_query(query, conn_id, params, ctx)
+        Args:
+            query: The SQL query to analyze
+            conn_id: Connection ID previously obtained from the connect tool
+            params: Parameters for the query (optional)
+            
+        Returns:
+            Complete JSON-formatted execution plan
+        """
+        # Prepend EXPLAIN to the query
+        explain_query = f"EXPLAIN (FORMAT JSON) {query}"
+        
+        # Execute the explain query
+        result = await execute_query(explain_query, conn_id, params)
+        
+        # Return the complete result
+        return result
