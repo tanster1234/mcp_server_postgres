@@ -79,8 +79,8 @@ cd pg-mcp
 python -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-# Install dependencies
-pip install -e .
+# Install using uv
+uv sync --frozen
 
 # Run the server
 python -m server.app
@@ -97,7 +97,7 @@ The repository includes test scripts to verify server functionality:
 python test.py "postgresql://username:password@hostname:port/database"
 
 # Claude-powered natural language to SQL conversion
-python claude_cli.py "Show me the top 5 customers by total sales"
+python client/claude_cli.py "Show me the top 5 customers by total sales"
 ```
 
 The `claude_cli.py` script requires environment variables:
@@ -109,48 +109,7 @@ ANTHROPIC_API_KEY=your-anthropic-api-key
 PG_MCP_URL=http://localhost:8000/sse
 ```
 
-### Client API Usage
 
-Connect to the server and execute queries:
-
-```python
-import asyncio
-from mcp import ClientSession
-from mcp.client.sse import sse_client
-
-async def query_database():
-    # Connect to the MCP server
-    async with sse_client(url="http://localhost:8000/sse") as streams:
-        async with ClientSession(*streams) as session:
-            await session.initialize()
-            
-            # Register a database connection
-            result = await session.call_tool(
-                "connect", 
-                {"connection_string": "postgresql://user:pass@host/db"}
-            )
-            
-            # Extract the connection ID
-            conn_id = json.loads(result.content[0].text).get('conn_id')
-            
-            # Execute a query
-            query_result = await session.call_tool(
-                "pg_query", 
-                {
-                    "query": "SELECT * FROM users LIMIT 10",
-                    "conn_id": conn_id
-                }
-            )
-            
-            # Process results
-            data = json.loads(query_result.content[0].text)
-            print(data)
-            
-            # Clean up when done
-            await session.call_tool("disconnect", {"conn_id": conn_id})
-
-asyncio.run(query_database())
-```
 
 ### For AI Agents
 
