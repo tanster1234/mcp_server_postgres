@@ -31,8 +31,8 @@ def register_schema_resources():
         query = """
             SELECT 
                 t.table_name,
-                obj_description(format('%s.%s', t.table_schema, t.table_name)::regclass::oid) as description,
-                pg_stat_get_tuples_inserted(format('%s.%s', t.table_schema, t.table_name)::regclass::oid) as total_rows
+                obj_description(format('"%s"."%s"', t.table_schema, t.table_name)::regclass::oid) as description,
+                pg_stat_get_tuples_inserted(format('"%s"."%s"', t.table_schema, t.table_name)::regclass::oid) as total_rows
             FROM information_schema.tables t
             WHERE 
                 t.table_schema = $1
