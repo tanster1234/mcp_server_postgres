@@ -4,7 +4,7 @@ A Model Context Protocol (MCP) server for PostgreSQL databases with enhanced cap
 
 ## Overview
 
-PG-MCP is a server implementation of the [Model Context Protocol](https://github.com/modelcontextprotocol/mcp) for PostgreSQL databases. It provides a comprehensive API for AI agents to discover, connect to, query, and understand PostgreSQL databases through MCP's resource-oriented architecture.
+PG-MCP is a server implementation of the [Model Context Protocol](https://modelcontextprotocol.io) for PostgreSQL databases. It provides a comprehensive API for AI agents to discover, connect to, query, and understand PostgreSQL databases through MCP's resource-oriented architecture.
 
 This implementation builds upon and extends the [reference Postgres MCP implementation](https://github.com/modelcontextprotocol/servers/tree/main/src/postgres) with several key enhancements:
 
