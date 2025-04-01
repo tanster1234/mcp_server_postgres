@@ -15,6 +15,24 @@ import plotly.express as px
 import plotly.graph_objects as go
 import os
 import dotenv
+import codecs
+
+
+def extract_relevant_tables(user_query: str, schema_info: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Returns only the schema info for tables mentioned in the user query."""
+    query_lower = user_query.lower()
+    relevant_tables = []
+    
+    for table in schema_info:
+        full_name = f"{table['schema']}.{table['table']}".lower()
+        short_name = table['table'].lower()
+
+        if full_name in query_lower or short_name in query_lower:
+            relevant_tables.append(table)
+    
+    return relevant_tables
+
+
 
 class PostgreSQLAssistantApp:
     def __init__(self):
@@ -188,7 +206,7 @@ class PostgreSQLAssistantApp:
             # Database URL input
             if not self.db_url:
                 self.db_url = st.text_input("PostgreSQL Connection URL", 
-                                         placeholder="postgresql://user:password@host:port/dbname",
+                                         placeholder="postgresql://pguser:pgpass@local-postgres:5432/pgdb",
                                          type="password")
 
             model_key = self.get_unique_key('model')
@@ -396,73 +414,220 @@ Here is the database schema you will use:
                 
             st.session_state.messages.append({"role": "user", "content": query})
             
+            # Get available tools from the server
+            response = await session.list_tools()
+            available_tools = [
+                {
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "input_schema": tool.inputSchema,
+                }
+                for tool in response.tools
+            ]
+
             # Get schema information for the prompt
-            schema_text = self.format_schema_for_prompt(st.session_state.schema_info)
+            # schema_text = self.format_schema_for_prompt(st.session_state.schema_info)
+            relevant_schema = extract_relevant_tables(query, st.session_state.schema_info)
+            schema_text = self.format_schema_for_prompt(relevant_schema)
             
-            # First, generate SQL using Claude
-            with st.status("Generating SQL query..."):
-                response_data = await self.generate_sql_with_anthropic(query, schema_text, model, max_tokens)
-                
-            # Extract SQL and explanation
-            sql_query = response_data.get("sql", "")
-            explanation = response_data.get("explanation", "")
-            
-            # Show the explanation and generated SQL
-            with st.chat_message("assistant"):
-                if explanation:
-                    st.write(explanation)
-                
-                if sql_query:
-                    with st.expander("Generated SQL Query"):
-                        st.code(sql_query, language="sql")
-                else:
-                    st.error("No SQL query was generated.")
-                    return
-            
-            # Execute the SQL query
-            if sql_query and st.session_state.conn_id:
-                with st.status("Executing SQL query..."):
+            system_prompt = f"""You are a master PostgreSQL assistant with deep knowledge of SQL and database operations.
+            Before executing any query, first verify the table names and structure. 
+            If tables are missing, explain why the query cannot be executed.
+            You have access to detailed column comments that provide context about each field.
+            Use this context to generate more accurate and meaningful queries.
+            Your job is to use the tools at your disposal to execute SQL queries and provide the results to the user.
+            If a query fails, analyze the error and try a corrected version.
+
+            IMPORTANT: When using the pg_query tool, you must provide both the query and conn_id parameters.
+            The conn_id should be obtained from the connect tool response.
+            Never pass the connection_string to the pg_query tool.
+
+            Here is the database schema with column comments:
+            {schema_text}
+            """
+
+            messages = st.session_state.messages
+
+            while True:
+                # Generate SQL using Claude with tools available
+                ai_response = await self.anthropic_client.messages.create(
+                    model=model,
+                    system=system_prompt,
+                    max_tokens=max_tokens,
+                    messages=messages,
+                    tools=available_tools
+                )
+
+                assistant_message_content = []
+                tool_uses = []
+
+                for content in ai_response.content:
+                    if content.type == "text":
+                        assistant_message_content.append({"type": "text", "text": content.text})
+                        with st.chat_message("assistant"):
+                            st.write(content.text)
+                    elif content.type == "tool_use":
+                        tool_uses.append(content)
+                        assistant_message_content.append({
+                            "type": "tool_use",
+                            "id": content.id,
+                            "name": content.name,
+                            "input": content.input
+                        })
+
+                messages.append({
+                    "role": "assistant",
+                    "content": assistant_message_content
+                })
+
+                if not tool_uses:
+                    break
+
+                tool_results = []
+                for tool_use in tool_uses:
                     try:
-                        result = await session.call_tool(
-                            "pg_query", 
-                            {
-                                "query": sql_query,
-                                "conn_id": st.session_state.conn_id
-                            }
-                        )
+                        # Handle connection tool separately
+                        if tool_use.name == "connect":
+                            result = await session.call_tool(
+                                "connect",
+                                {"connection_string": self.db_url}
+                            )
+                            if hasattr(result, 'content') and result.content:
+                                content = result.content[0]
+                                if hasattr(content, 'text'):
+                                    result_data = json.loads(content.text)
+                                    conn_id = result_data.get('conn_id')
+                                    if conn_id:
+                                        st.session_state.conn_id = conn_id
+                                        tool_results.append({
+                                            "type": "tool_result",
+                                            "tool_use_id": tool_use.id,
+                                            "content": f"Successfully connected with ID: {conn_id}"
+                                        })
+                                        continue
                         
+                        # For pg_query tool, ensure we have conn_id
+                        if tool_use.name == "pg_query":
+                            if not st.session_state.conn_id:
+                                tool_results.append({
+                                    "type": "tool_result",
+                                    "tool_use_id": tool_use.id,
+                                    "content": "Error: No active database connection. Please connect first."
+                                })
+                                continue
+                            
+                            # Ensure the input has both query and conn_id
+                            tool_input = cast(dict, tool_use.input)
+                            if "query" not in tool_input:
+                                tool_results.append({
+                                    "type": "tool_result",
+                                    "tool_use_id": tool_use.id,
+                                    "content": "Error: Query parameter is missing"
+                                })
+                                continue
+                            
+                            # Add conn_id to the input
+                            tool_input["conn_id"] = st.session_state.conn_id
+                            result = await session.call_tool(
+                                tool_use.name,
+                                tool_input
+                            )
+                        else:
+                            # For other tools, execute normally
+                            result = await session.call_tool(
+                                tool_use.name,
+                                cast(dict, tool_use.input)
+                            )
+
                         # Extract and format results
                         if hasattr(result, 'content') and result.content:
                             content = result.content[0]
                             if hasattr(content, 'text'):
-                                query_results = json.loads(content.text)
+                                result_text = content.text.strip()
                                 
-                                # Display results as a table
-                                with st.chat_message("assistant"):
-                                    st.write("Query Results:")
-                                    if query_results and isinstance(query_results, list):
+                                # Debug: Print raw result
+                                st.write("Raw result from server:", result_text)
+                                
+                                # Display the SQL query
+                                with st.expander("📜 Executed SQL Query"):
+                                    try:
+                                        sql_display = tool_use.input.get("query") if isinstance(tool_use.input, dict) else str(tool_use.input)
+                                        if sql_display:
+                                            st.code(sql_display, language='sql')
+                                        else:
+                                            st.write("Raw tool input:", tool_use.input)
+                                    except Exception as e:
+                                        st.warning("Failed to retrieve SQL query.")
+                                        st.write("Raw tool input:", tool_use.input)
+
+                                # Try to parse and display results as a table if possible
+                                try:
+                                    query_results = []
+
+                                    for item in result.content:
+                                        if hasattr(item, 'text'):
+                                            text = item.text.strip()
+
+                                            # Try JSON array first
+                                            try:
+                                                parsed = json.loads(text)
+                                                if isinstance(parsed, list):
+                                                    query_results.extend(parsed)
+                                                    continue
+                                                elif isinstance(parsed, dict):
+                                                    query_results.append(parsed)
+                                                    continue
+                                            except json.JSONDecodeError:
+                                                pass
+
+                                            # Try line-delimited JSON objects
+                                            for line in text.splitlines():
+                                                try:
+                                                    parsed_line = json.loads(line.strip())
+                                                    query_results.append(parsed_line)
+                                                except json.JSONDecodeError:
+                                                    continue  # ignore unparsable lines
+
+                                    if query_results:
                                         df = pd.DataFrame(query_results)
-                                        st.dataframe(df)
+                                        st.dataframe(df, use_container_width=True)
                                         st.write(f"Total rows: {len(query_results)}")
-                                        
-                                        # Store result for visualization
-                                        result_summary = f"Query returned {len(query_results)} rows.\n\n"
-                                        result_summary += df.head(20).to_string()
-                                        st.session_state.last_query_result = result_summary
-                                    elif query_results:
-                                        st.json(query_results)
-                                        st.session_state.last_query_result = json.dumps(query_results, indent=2)
+                                        result_text = f"Query returned {len(query_results)} rows.\n\n{df.to_string()}"
                                     else:
-                                        st.info("Query executed successfully but returned no results.")
-                                        st.session_state.last_query_result = "Query executed but no results returned."
+                                        st.info("Query executed successfully but returned no parsable rows.")
+                                        result_text = "Query returned no parsable rows."
+                                except Exception as e:
+                                    st.error(f"Error processing results: {e}")
+                                    st.write("Failed to process results. Raw result:", result_text)
+                                    st.code(result_text)
+
+                                tool_result = {
+                                    "type": "tool_result",
+                                    "tool_use_id": tool_use.id,
+                                    "content": result_text
+                                }
+                                tool_results.append(tool_result)
+                                st.session_state.last_query_result = result_text
+
                             else:
                                 st.warning("Query executed but returned an unexpected format.")
                         else:
                             st.warning("Query executed but returned no content.")
-                    except Exception as e:
-                        st.error(f"Error executing SQL query: {e}")
-                        st.error(f"Failed query was: {sql_query}")
-            
+
+                    except Exception as tool_error:
+                        st.error(f"Tool execution error: {tool_error}")
+                        # Add the error to tool results so the AI can learn from it
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use.id,
+                            "content": f"Error: {str(tool_error)}"
+                        })
+
+                messages.append({
+                    "role": "user",
+                    "content": tool_results
+                })
+
             st.session_state.sql_finished = True
             
         except Exception as e:
