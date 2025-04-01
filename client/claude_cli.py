@@ -147,10 +147,13 @@ async def generate_sql_with_anthropic(user_query, schema_text, anthropic_api_key
     client = anthropic.Anthropic(api_key=anthropic_api_key)
     
     system_prompt = f"""You are an expert PostgreSQL developer who will translate a natural language query into a SQL query.
-
+Before executing any query, first verify the table names and structure. 
+If tables are missing, explain why the query cannot be executed.
 You must provide your response in JSON format with two required fields:
 1. "explanation": A brief explanation of your approach to the query
 2. "sql": The valid, executable PostgreSQL SQL query
+
+IMPORTANT: If your SQL query contains curly braces {{ or }}, you must escape them by doubling them: {{ becomes {{ and }} becomes }}.
 
 Here is the database schema you will use:
 {schema_text}
@@ -158,7 +161,6 @@ Here is the database schema you will use:
     
     try:
         # Use response template prefilling to force Claude to produce JSON
-        # This works by adding an assistant message that starts with the JSON structure
         response = client.messages.create(
             model="claude-3-5-sonnet-20240620",
             max_tokens=1024,
@@ -172,57 +174,53 @@ Here is the database schema you will use:
         # Extract the result
         result_text = response.content[0].text
         
-        # Since we prefilled with '{"explanation": "', we need to ensure the JSON is complete
-        # First check if the result already contains both fields
-        if '"sql":' in result_text:
-            # The response likely contains both fields, try to parse it as is
-            try:
-                # Make sure JSON is properly closed with a final brace if needed
-                if not result_text.strip().endswith('}'):
-                    result_text += '}'
-                
-                result_json = json.loads(result_text)
-                
-                # If parsing succeeded and has both required fields, return it
-                if "explanation" in result_json and "sql" in result_json:
-                    return result_json
-            except json.JSONDecodeError:
-                # If parsing failed, we'll continue with more clean-up attempts
-                pass
-            
-        # If we're here, the JSON wasn't complete. Let's try to fix it.
-        # Make sure there's a closing quote for explanation
-        if '"sql":' not in result_text:
-            result_text += '", "sql": ""}'
-            
-        # Now try to parse the fixed JSON
+        # First try to parse the complete JSON response
         try:
+            if not result_text.strip().endswith('}'):
+                result_text += '}'
             result_json = json.loads(result_text)
-            return result_json
-        except json.JSONDecodeError:
-            # If all attempts failed, extract what we can using string manipulation
-            explanation = result_text.split('"sql":', 1)[0].strip()
-            if explanation.endswith(','):
-                explanation = explanation[:-1]
-            if not explanation.endswith('"'):
-                explanation += '"'
-                
-            # Try to extract SQL
-            sql = ""
-            if '"sql":' in result_text:
-                sql_part = result_text.split('"sql":', 1)[1].strip()
-                if sql_part.startswith('"'):
-                    sql = sql_part.split('"', 2)[1]
-                else:
-                    # Handle the case where sql value isn't properly quoted
-                    sql = sql_part.split('}', 1)[0].strip()
-                    if sql.endswith('"'):
-                        sql = sql[:-1]
             
-            return {
-                "explanation": explanation.replace('{"explanation": "', ''),
-                "sql": sql
-            }
+            # If we have both fields, process the SQL to handle escaped braces
+            if "explanation" in result_json and "sql" in result_json:
+                # Replace escaped braces in SQL
+                sql = result_json["sql"].replace("{{", "{").replace("}}", "}")
+                result_json["sql"] = sql
+                return result_json
+        except json.JSONDecodeError:
+            # If parsing failed, try to extract fields manually
+            pass
+            
+        # Manual extraction fallback
+        explanation = ""
+        sql = ""
+        
+        # Extract explanation
+        if '"explanation":' in result_text:
+            explanation_part = result_text.split('"explanation":', 1)[1].strip()
+            if explanation_part.startswith('"'):
+                explanation = explanation_part.split('"', 2)[1]
+            else:
+                explanation = explanation_part.split(',', 1)[0].strip()
+                if explanation.endswith('"'):
+                    explanation = explanation[:-1]
+        
+        # Extract SQL
+        if '"sql":' in result_text:
+            sql_part = result_text.split('"sql":', 1)[1].strip()
+            if sql_part.startswith('"'):
+                sql = sql_part.split('"', 2)[1]
+            else:
+                sql = sql_part.split('}', 1)[0].strip()
+                if sql.endswith('"'):
+                    sql = sql[:-1]
+            
+            # Replace escaped braces in SQL
+            sql = sql.replace("{{", "{").replace("}}", "}")
+        
+        return {
+            "explanation": explanation.replace('{"explanation": "', ''),
+            "sql": sql
+        }
             
     except Exception as e:
         print(f"Error calling Anthropic API: {e}")

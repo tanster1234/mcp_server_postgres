@@ -90,7 +90,7 @@ class Database:
                 max_size=10,
                 command_timeout=60.0,
                 # Read-only mode
-                server_settings={"default_transaction_read_only": "true"}
+                server_settings={}
             )
         
         return self

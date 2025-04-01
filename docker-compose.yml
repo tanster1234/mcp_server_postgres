@@ -17,6 +17,17 @@ services:
     restart: unless-stopped
     networks:
       - pg-mcp-network
+  db:
+    image: postgres
+    container_name: local-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: pguser
+      POSTGRES_PASSWORD: pgpass
+      POSTGRES_DB: pgdb
+    networks:
+      - pg-mcp-network
 
 networks:
   pg-mcp-network:
