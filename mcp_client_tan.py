@@ -251,6 +251,13 @@ class PostgreSQLAssistantApp:
         You are a data visualization expert. You will receive the result of a SQL query in plain text (not a DataFrame).
         It may contain insights or summaries, not necessarily tabular data. Your task is to propose meaningful and
         relevant visualizations using plotly based on the textual result. Only return Python code that creates the visualizations.
+        
+        IMPORTANT:
+        1. NEVER use .get() method on any object that might be undefined or null
+        2. Always check if a variable exists before accessing its properties
+        3. Use defensive programming practices: check if dataframes are empty before plotting
+        4. Ensure all plotly operations have proper error handling
+        5. If the input data isn't suitable for visualization, return a simple message saying so
         """
 
         messages = [
@@ -270,45 +277,166 @@ class PostgreSQLAssistantApp:
                     st.code(content.text, language='python')
                     try:
                         cleaned_code = re.sub(r'^```(?:python)?\n|```$', '', content.text.strip(), flags=re.MULTILINE).strip()
+                        
+                        # Create safe execution environment with error handling
                         exec_globals = {
                             "st": st,
                             "pd": pd,
                             "px": px,
-                            "go": go
+                            "go": go,
+                            "result_text": result_text
                         }
-
+                        
+                        # Safe DataFrame creation function
+                        def safe_create_dataframe(data, **kwargs):
+                            try:
+                                return pd.DataFrame(data, **kwargs)
+                            except Exception as df_err:
+                                st.warning(f"Failed to create DataFrame: {df_err}")
+                                return pd.DataFrame()  # Return empty dataframe instead of None
+                        
+                        exec_globals['safe_create_dataframe'] = safe_create_dataframe
+                        
                         # Patch timeline to avoid x_start == x_end error
                         original_timeline = px.timeline
                         def safe_timeline(*args, **kwargs):
-                            df = kwargs.get('data_frame', args[0] if args else None)
-                            if df is not None and 'x_start' in kwargs and 'x_end' in kwargs:
-                                if isinstance(df, pd.DataFrame):
-                                    df = df.copy()
-                                    x_start = kwargs['x_start']
-                                    x_end = kwargs['x_end']
-                                    if (df[x_end] == df[x_start]).all():
-                                        df[x_end] = pd.to_datetime(df[x_end]) + pd.Timedelta(days=1)
-                                    kwargs['data_frame'] = df
-                            fig = original_timeline(*args, **kwargs)
-                            fig.show = lambda: st.plotly_chart(fig, use_container_width=True)
-                            return fig
+                            try:
+                                df = kwargs.get('data_frame', args[0] if args else None)
+                                if df is not None and 'x_start' in kwargs and 'x_end' in kwargs:
+                                    if isinstance(df, pd.DataFrame) and not df.empty:  # Check if df is not empty
+                                        df = df.copy()
+                                        x_start = kwargs['x_start']
+                                        x_end = kwargs['x_end']
+                                        if x_start in df.columns and x_end in df.columns:  # Verify columns exist
+                                            # Safely check for equal values
+                                            equal_values = df[x_start] == df[x_end]
+                                            if isinstance(equal_values, pd.Series) and equal_values.any():
+                                                df[x_end] = pd.to_datetime(df[x_end]) + pd.Timedelta(days=1)
+                                        kwargs['data_frame'] = df
+                                fig = original_timeline(*args, **kwargs)
+                                fig.show = lambda: st.plotly_chart(fig, use_container_width=True)
+                                return fig
+                            except Exception as timeline_err:
+                                st.warning(f"Timeline plot error: {timeline_err}")
+                                # Return empty figure on error
+                                empty_fig = go.Figure()
+                                empty_fig.show = lambda: st.plotly_chart(empty_fig, use_container_width=True)
+                                return empty_fig
+                        
                         exec_globals['px'].timeline = safe_timeline
-
-                        # Patch all show() methods to use Streamlit
+                        
+                        # Add a safe figure creation wrapper
+                        def safe_figure(*args, **kwargs):
+                            try:
+                                fig = go.Figure(*args, **kwargs)
+                                fig.show = lambda: st.plotly_chart(fig, use_container_width=True)
+                                return fig
+                            except Exception as fig_err:
+                                st.warning(f"Figure creation error: {fig_err}")
+                                empty_fig = go.Figure()
+                                empty_fig.show = lambda: st.plotly_chart(empty_fig, use_container_width=True)
+                                return empty_fig
+                        
+                        exec_globals['safe_figure'] = safe_figure
+                        
+                        # Patch all show() methods to use Streamlit and add error handling
                         def patched_show(fig):
-                            st.plotly_chart(fig, use_container_width=True)
+                            try:
+                                st.plotly_chart(fig, use_container_width=True)
+                            except Exception as show_err:
+                                st.warning(f"Error displaying chart: {show_err}")
+                        
                         exec_globals['go'].Figure.show = patched_show
-                        exec_globals['px'].pie().show = patched_show
-                        exec_globals['px'].scatter().show = patched_show
-                        exec_globals['px'].bar().show = patched_show
-                        exec_globals['px'].line().show = patched_show
-
-                        exec(cleaned_code, exec_globals)
+                        
+                        # Safe patching for other plotly functions
+                        safe_functions = ['pie', 'scatter', 'bar', 'line', 'histogram', 'box']
+                        for func_name in safe_functions:
+                            if hasattr(px, func_name):
+                                original_func = getattr(px, func_name)
+                                def safe_plot_func(original=original_func):
+                                    def wrapper(*args, **kwargs):
+                                        try:
+                                            fig = original(*args, **kwargs)
+                                            fig.show = lambda: st.plotly_chart(fig, use_container_width=True)
+                                            return fig
+                                        except Exception as plot_err:
+                                            st.warning(f"Plot creation error: {plot_err}")
+                                            empty_fig = go.Figure()
+                                            empty_fig.show = lambda: st.plotly_chart(empty_fig, use_container_width=True)
+                                            return empty_fig
+                                    return wrapper
+                                exec_globals['px'].__dict__[func_name] = safe_plot_func()
+                        
+                        # Process the text result to create a DataFrame if needed
+                        def safe_process_text_to_df(text):
+                            try:
+                                # Try to parse as JSON first
+                                try:
+                                    data = json.loads(text)
+                                    if isinstance(data, list):
+                                        return pd.DataFrame(data)
+                                    elif isinstance(data, dict):
+                                        return pd.DataFrame([data])
+                                except json.JSONDecodeError:
+                                    pass
+                                
+                                # Try to parse as CSV
+                                try:
+                                    return pd.read_csv(io.StringIO(text))
+                                except:
+                                    pass
+                                
+                                # Try to extract table-like data with line splitting
+                                lines = text.strip().split('\n')
+                                if len(lines) > 1:
+                                    # Check if it looks like a table with headers
+                                    header = lines[0]
+                                    if '|' in header or '\t' in header or ',' in header:
+                                        delimiter = '|' if '|' in header else ('\t' if '\t' in header else ',')
+                                        return pd.read_csv(io.StringIO(text), delimiter=delimiter)
+                                
+                                # Just return empty DataFrame if all else fails
+                                return pd.DataFrame()
+                            except Exception as process_err:
+                                st.warning(f"Failed to process text to DataFrame: {process_err}")
+                                return pd.DataFrame()
+                        
+                        exec_globals['safe_process_text_to_df'] = safe_process_text_to_df
+                        
+                        # Add the function to the globals
+                        exec_globals['result_df'] = safe_process_text_to_df(result_text)
+                        
+                        # Wrap the execution in a try-except block for additional safety
+                        try:
+                            exec(cleaned_code, exec_globals)
+                        except Exception as exec_err:
+                            st.error(f"Visualization code execution error: {exec_err}")
+                            
+                            # Try to simplify the code and run a basic visualization as fallback
+                            if isinstance(exec_globals.get('result_df'), pd.DataFrame) and not exec_globals['result_df'].empty:
+                                st.write("Attempting simplified visualization:")
+                                df = exec_globals['result_df']
+                                
+                                # Create a simple bar or line chart based on dataframe structure
+                                try:
+                                    if len(df.columns) >= 2:
+                                        numeric_cols = df.select_dtypes(include=['number']).columns
+                                        if len(numeric_cols) > 0:
+                                            # Get the first numeric column for a simple bar chart
+                                            y_col = numeric_cols[0]
+                                            x_col = df.columns[0] if df.columns[0] != y_col else df.columns[1]
+                                            
+                                            fig = px.bar(df, x=x_col, y=y_col, title=f"Simple visualization of {y_col} by {x_col}")
+                                            st.plotly_chart(fig, use_container_width=True)
+                                except Exception as fallback_err:
+                                    st.warning(f"Fallback visualization failed: {fallback_err}")
+                    
                     except Exception as exec_err:
                         st.error(f"Execution error: {exec_err}")
 
         except Exception as e:
             st.warning(f"Could not generate visualizations: {e}")
+
 
     async def generate_sql_with_anthropic(self, user_query, schema_text, model, max_tokens):
         """Generate SQL using Claude with response template prefilling."""
@@ -425,8 +553,33 @@ Here is the database schema you will use:
                 for tool in response.tools
             ]
 
+            # Force a new connection for each query as recommended
+            if self.db_url:
+                try:
+                    # Use the connect tool to register a new connection
+                    connect_result = await session.call_tool(
+                        "connect",
+                        {
+                            "connection_string": self.db_url
+                        }
+                    )
+                    
+                    # Extract connection ID
+                    if hasattr(connect_result, 'content') and connect_result.content:
+                        content = connect_result.content[0]
+                        if hasattr(content, 'text'):
+                            result_data = json.loads(content.text)
+                            conn_id = result_data.get('conn_id')
+                            if conn_id:
+                                st.session_state.conn_id = conn_id
+                                # Optionally refresh schema information with each new connection
+                                st.session_state.schema_info = await self.fetch_schema_info(session, conn_id)
+                except Exception as e:
+                    st.error(f"Failed to establish a fresh connection: {e}")
+                    logging.error(f"Connection refresh error: {e}")
+                    # Continue with existing connection if available, otherwise fail
+
             # Get schema information for the prompt
-            # schema_text = self.format_schema_for_prompt(st.session_state.schema_info)
             relevant_schema = extract_relevant_tables(query, st.session_state.schema_info)
             schema_text = self.format_schema_for_prompt(relevant_schema)
             
@@ -486,26 +639,6 @@ Here is the database schema you will use:
                 tool_results = []
                 for tool_use in tool_uses:
                     try:
-                        # Handle connection tool separately
-                        if tool_use.name == "connect":
-                            result = await session.call_tool(
-                                "connect",
-                                {"connection_string": self.db_url}
-                            )
-                            if hasattr(result, 'content') and result.content:
-                                content = result.content[0]
-                                if hasattr(content, 'text'):
-                                    result_data = json.loads(content.text)
-                                    conn_id = result_data.get('conn_id')
-                                    if conn_id:
-                                        st.session_state.conn_id = conn_id
-                                        tool_results.append({
-                                            "type": "tool_result",
-                                            "tool_use_id": tool_use.id,
-                                            "content": f"Successfully connected with ID: {conn_id}"
-                                        })
-                                        continue
-                        
                         # For pg_query tool, ensure we have conn_id
                         if tool_use.name == "pg_query":
                             if not st.session_state.conn_id:
@@ -526,7 +659,7 @@ Here is the database schema you will use:
                                 })
                                 continue
                             
-                            # Add conn_id to the input
+                            # Important change: Add conn_id to the input from session state
                             tool_input["conn_id"] = st.session_state.conn_id
                             result = await session.call_tool(
                                 tool_use.name,
@@ -544,9 +677,6 @@ Here is the database schema you will use:
                             content = result.content[0]
                             if hasattr(content, 'text'):
                                 result_text = content.text.strip()
-                                
-                                # Debug: Print raw result
-                                st.write("Raw result from server:", result_text)
                                 
                                 # Display the SQL query
                                 with st.expander("📜 Executed SQL Query"):
@@ -612,7 +742,16 @@ Here is the database schema you will use:
                             else:
                                 st.warning("Query executed but returned an unexpected format.")
                         else:
-                            st.warning("Query executed but returned no content.")
+                            st.info("Query executed successfully. No data returned (common for INSERT, UPDATE, DELETE operations).")
+                            # Create a default message for non-returning queries to avoid empty content
+                            result_text = "Operation completed successfully. No data was returned (typical for INSERT, UPDATE, DELETE operations)."
+                            tool_result = {
+                                "type": "tool_result",
+                                "tool_use_id": tool_use.id,
+                                "content": result_text
+                            }
+                            tool_results.append(tool_result)
+                            st.session_state.last_query_result = result_text
 
                     except Exception as tool_error:
                         st.error(f"Tool execution error: {tool_error}")
@@ -623,16 +762,29 @@ Here is the database schema you will use:
                             "content": f"Error: {str(tool_error)}"
                         })
 
-                messages.append({
-                    "role": "user",
-                    "content": tool_results
-                })
+                # Ensure we're not sending empty content to the API
+                if tool_results:
+                    messages.append({
+                        "role": "user",
+                        "content": tool_results
+                    })
+                else:
+                    # Fallback for when no tool results were generated
+                    messages.append({
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": tool_uses[0].id if tool_uses else "fallback_id",
+                            "content": "The operation was processed but no specific result data was returned."
+                        }]
+                    })
 
             st.session_state.sql_finished = True
             
         except Exception as e:
             st.error(f"Query processing error: {e}")
             logging.error(f"Query processing error: {e}")
+
 
     async def connect_to_database(self, session):
         """Connect to the PostgreSQL database and store connection ID"""
