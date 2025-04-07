@@ -221,7 +221,7 @@ class PostgreSQLAssistantApp:
                 "Max Response Tokens", 
                 min_value=1000, 
                 max_value=16000, 
-                value=8000,
+                value=10000,
                 key=tokens_key
             )
 
@@ -553,31 +553,113 @@ Here is the database schema you will use:
                 for tool in response.tools
             ]
 
-            # Force a new connection for each query as recommended
+            # Force a new connection for each query with strict validation
+            conn_id = None
             if self.db_url:
-                try:
-                    # Use the connect tool to register a new connection
-                    connect_result = await session.call_tool(
-                        "connect",
-                        {
-                            "connection_string": self.db_url
-                        }
-                    )
-                    
-                    # Extract connection ID
-                    if hasattr(connect_result, 'content') and connect_result.content:
-                        content = connect_result.content[0]
-                        if hasattr(content, 'text'):
-                            result_data = json.loads(content.text)
-                            conn_id = result_data.get('conn_id')
-                            if conn_id:
-                                st.session_state.conn_id = conn_id
-                                # Optionally refresh schema information with each new connection
-                                st.session_state.schema_info = await self.fetch_schema_info(session, conn_id)
-                except Exception as e:
-                    st.error(f"Failed to establish a fresh connection: {e}")
-                    logging.error(f"Connection refresh error: {e}")
-                    # Continue with existing connection if available, otherwise fail
+                connection_placeholder = st.empty()
+                with connection_placeholder.container():
+                    with st.status("Establishing database connection...") as status:
+                        try:
+                            # Explicitly clear the previous connection ID
+                            st.session_state.conn_id = None
+                            
+                            # Use the connect tool to register a new connection
+                            connect_result = await session.call_tool(
+                                "connect",
+                                {
+                                    "connection_string": self.db_url
+                                }
+                            )
+                            
+                            # Wait a moment to ensure connection is established
+                            await asyncio.sleep(1)
+                            
+                            # Extract connection ID with strict validation
+                            conn_id = None
+                            if hasattr(connect_result, 'content') and connect_result.content:
+                                for content_item in connect_result.content:
+                                    if hasattr(content_item, 'text'):
+                                        try:
+                                            result_data = json.loads(content_item.text)
+                                            if isinstance(result_data, dict) and 'conn_id' in result_data:
+                                                conn_id = result_data.get('conn_id')
+                                                break
+                                        except json.JSONDecodeError:
+                                            continue
+                            
+                            if not conn_id:
+                                status.update(label="Failed: Could not obtain valid connection ID", state="error")
+                                st.error("Failed to obtain a valid connection ID. Please check your database connection.")
+                                return
+                            
+                            # Store the connection ID in session state
+                            st.session_state.conn_id = conn_id
+                            logging.info(f"Established connection with ID: {conn_id}")
+                            status.update(label=f"Connection established successfully. ID: {conn_id[:8]}...")
+                            
+                            # Update status for schema fetching
+                            status.update(label="Fetching database schema...")
+                            
+                            # Explicitly wait for schema information with a timeout and retry logic
+                            max_retries = 3
+                            for attempt in range(1, max_retries + 1):
+                                try:
+                                    # Use asyncio.wait_for to add a timeout
+                                    schema_info = await asyncio.wait_for(
+                                        self.fetch_schema_info(session, conn_id),
+                                        timeout=20  # 20 second timeout for schema fetching
+                                    )
+                                    
+                                    # Only update schema info if we got valid data
+                                    if schema_info:
+                                        st.session_state.schema_info = schema_info
+                                        status.update(label=f"Schema loaded successfully with {len(schema_info)} tables")
+                                        break
+                                    else:
+                                        if attempt < max_retries:
+                                            status.update(label=f"Schema empty, retrying ({attempt}/{max_retries})...")
+                                            await asyncio.sleep(2)  # Wait before retry
+                                        else:
+                                            status.update(label="Warning: Schema loaded but empty", state="warning")
+                                            logging.warning("Schema information returned empty after all retries")
+                                except asyncio.TimeoutError:
+                                    if attempt < max_retries:
+                                        status.update(label=f"Schema fetch timed out, retrying ({attempt}/{max_retries})...")
+                                        await asyncio.sleep(2)  # Wait before retry
+                                    else:
+                                        status.update(label="Warning: Schema fetch timed out, using existing schema", state="warning")
+                                        logging.warning("Schema fetch timed out after all retries")
+                                except Exception as schema_error:
+                                    if attempt < max_retries:
+                                        status.update(label=f"Schema fetch error, retrying ({attempt}/{max_retries})...")
+                                        logging.error(f"Schema fetch error (attempt {attempt}): {schema_error}")
+                                        await asyncio.sleep(2)  # Wait before retry
+                                    else:
+                                        status.update(label=f"Error fetching schema: {str(schema_error)}", state="error")
+                                        logging.error(f"Schema fetch error (final): {schema_error}")
+                            
+                        except Exception as e:
+                            status.update(label=f"Connection failed: {str(e)}", state="error")
+                            st.error(f"Failed to establish a connection: {e}")
+                            logging.error(f"Connection error: {e}")
+                            return  # Don't proceed if we can't establish a connection
+                
+                # Clear the connection status to save space after it's done
+                connection_placeholder.empty()
+
+            # Additional verification that connection ID exists before proceeding
+            if not st.session_state.conn_id:
+                st.error("No connection ID available. Cannot execute query.")
+                return
+
+            # Verify conn_id matches what we expect
+            if conn_id and st.session_state.conn_id != conn_id:
+                logging.error(f"Connection ID mismatch: local={conn_id}, session={st.session_state.conn_id}")
+                st.error("Connection ID inconsistency detected. Updating to latest.")
+                st.session_state.conn_id = conn_id
+
+            # Display the connection ID for debugging
+            st.info(f"Using connection ID: {st.session_state.conn_id[:8]}... (truncated for security)")
 
             # Get schema information for the prompt
             relevant_schema = extract_relevant_tables(query, st.session_state.schema_info)
@@ -591,8 +673,9 @@ Here is the database schema you will use:
             Your job is to use the tools at your disposal to execute SQL queries and provide the results to the user.
             If a query fails, analyze the error and try a corrected version.
 
-            IMPORTANT: When using the pg_query tool, you must provide both the query and conn_id parameters.
-            The conn_id should be obtained from the connect tool response.
+            IMPORTANT: When using the pg_query tool, you must ALWAYS provide both the query and conn_id parameters.
+            The current conn_id is: {st.session_state.conn_id}
+            Always use this exact conn_id value when making pg_query calls.
             Never pass the connection_string to the pg_query tool.
 
             Here is the database schema with column comments:
@@ -636,11 +719,17 @@ Here is the database schema you will use:
                 if not tool_uses:
                     break
 
+                # Recheck connection ID before executing tools
+                if not st.session_state.conn_id:
+                    st.error("Connection ID lost during query execution. Please try again.")
+                    break
+
                 tool_results = []
                 for tool_use in tool_uses:
                     try:
                         # For pg_query tool, ensure we have conn_id
                         if tool_use.name == "pg_query":
+                            # Double-check connection ID availability
                             if not st.session_state.conn_id:
                                 tool_results.append({
                                     "type": "tool_result",
@@ -649,7 +738,7 @@ Here is the database schema you will use:
                                 })
                                 continue
                             
-                            # Ensure the input has both query and conn_id
+                            # Ensure the input has query parameter
                             tool_input = cast(dict, tool_use.input)
                             if "query" not in tool_input:
                                 tool_results.append({
@@ -659,8 +748,26 @@ Here is the database schema you will use:
                                 })
                                 continue
                             
-                            # Important change: Add conn_id to the input from session state
+                            # Create a fresh copy of the input to avoid modifying the original
+                            tool_input = dict(tool_input)
+                            
+                            # Check if conn_id is already in the input and log it
+                            if "conn_id" in tool_input:
+                                existing_conn_id = tool_input["conn_id"]
+                                logging.info(f"Tool already has conn_id: {existing_conn_id}")
+                                if existing_conn_id != st.session_state.conn_id:
+                                    logging.warning(f"Replacing incorrect conn_id: {existing_conn_id} with {st.session_state.conn_id}")
+                            
+                            # Explicitly set the connection ID from session state
                             tool_input["conn_id"] = st.session_state.conn_id
+                            
+                            # Log the query execution
+                            logging.info(f"Executing query with connection ID: {st.session_state.conn_id}")
+                            if "query" in tool_input:
+                                query_preview = tool_input["query"][:50] + "..." if len(tool_input["query"]) > 50 else tool_input["query"]
+                                logging.info(f"Query: {query_preview}")
+                            
+                            # Execute the tool with the prepared input
                             result = await session.call_tool(
                                 tool_use.name,
                                 tool_input
@@ -784,6 +891,7 @@ Here is the database schema you will use:
         except Exception as e:
             st.error(f"Query processing error: {e}")
             logging.error(f"Query processing error: {e}")
+
 
 
     async def connect_to_database(self, session):
