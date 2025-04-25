@@ -21,4 +21,7 @@ WORKDIR /app
 RUN uv sync --frozen
 
 # Run the application
-CMD ["uv", "run", "-m", "server.app"]
+RUN pip install "mcp"
+RUN pip install "asyncpg"
+RUN pip install PyYAML
+CMD ["python", "-m", "server.app"]

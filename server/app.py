@@ -1,11 +1,15 @@
 # server/app.py
-from mcp.server.fastmcp.utilities.logging import configure_logging, get_logger
 import logging
-import sys
 
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("pg-mcp")
+
+import sys
+import os
+sys.path.append("/app") 
 # Configure logging
-configure_logging(level="DEBUG")
-logger = get_logger("pg-mcp")
+# configure_logging(level="DEBUG")
+# logger = get_logger("pg-mcp")
 
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.DEBUG)

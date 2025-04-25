@@ -195,26 +195,20 @@ class PostgreSQLAssistantApp:
         for table_info in schema_info:
             schema_name = table_info.get('schema')
             table_name = table_info.get('table')
-            description = table_info.get('description', '')
+            description = table_info.get('description', 'No description available.')
             
-            schema_text += f"Table: {schema_name}.{table_name}"
-            if description:
-                schema_text += f" - {description}"
-            schema_text += "\n"
+            schema_text += f"Table: {schema_name}.{table_name} - {description}\n"
             
             columns = table_info.get('columns', [])
             if columns:
                 schema_text += "Columns:\n"
                 for col in columns:
-                    col_name = col.get('column_name', '')
-                    data_type = col.get('data_type', '')
-                    is_nullable = col.get('is_nullable', '')
-                    description = col.get('description', '')
+                    col_name = col.get('column_name', 'Unknown')
+                    data_type = col.get('data_type', 'Unknown')
+                    is_nullable = col.get('is_nullable', 'Unknown')
+                    col_description = col.get('description', 'No description available.')
                     
-                    schema_text += f"  - {col_name} ({data_type}, nullable: {is_nullable})"
-                    if description:
-                        schema_text += f" - {description}"
-                    schema_text += "\n"
+                    schema_text += f"  - {col_name} ({data_type}, nullable: {is_nullable}) - {col_description}\n"
             
             schema_text += "\n"
         
@@ -401,15 +395,16 @@ class PostgreSQLAssistantApp:
 
             system_prompt = textwrap.dedent(f"""\
                 You are a master PostgreSQL assistant. 
-                Before executing any query, first verify the table names and structure. 
+                The schema context has been provided. Do not re-fetch the schema from the database. Use the provided schema context for all queries.
+                Before executing any query, verify the table names and structure using the provided schema.
                 If tables are missing, explain why the query cannot be executed. 
-                
+
                 IMPORTANT: Never make up or hallucinate data. Only discuss the actual results returned by the SQL query.
                 If the query returns no results or an empty table, clearly state this fact. Do not invent sample data.
                 Always base your analysis strictly on the data returned by the executed SQL queries.
                 
                 When using the pg_query tool, always include the conn_id parameter with the value: {st.session_state.conn_id}
-                
+
                 {schema_text}
             """)
 
@@ -595,7 +590,7 @@ class PostgreSQLAssistantApp:
                 query = st.session_state.get("current_query", None)
                 if query:
                     model = st.session_state.get("model", "claude-3-7-sonnet-latest")
-                    max_tokens = st.session_state.get("max_tokens", 8000)
+                    max_tokens = st.session_state.get("max_tokens", 10000)
                     await self.process_query(session, query, model, max_tokens)
                     st.session_state.current_query = None
                 
