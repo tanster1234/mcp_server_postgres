@@ -52,7 +52,7 @@ class PostgreSQLAssistantApp:
         self.logger = logging.getLogger(__name__)
 
         self.anthropic_client = anthropic.AsyncAnthropic()
-        self.pg_mcp_url = os.getenv("PG_MCP_URL", "http://localhost:8000/sse")
+        self.pg_mcp_url = os.getenv("PG_MCP_URL", "http://10.1.4.112:8000/sse")
         self.db_url = os.getenv("DATABASE_URL", "")
 
     def get_unique_key(self, prefix=''):
@@ -71,7 +71,7 @@ class PostgreSQLAssistantApp:
 
     def render_sidebar(self):
         with st.sidebar:
-            st.image("OPSVEDA-logo.png", use_container_width=True) 
+            # st.image("OPSVEDA-logo.png", use_container_width=True) 
             st.header("🛠️ Query Configuration")
 
             model_key = self.get_unique_key('model')

@@ -41,6 +41,17 @@ def register_schema_resources():
         """
         return await execute_query(query, conn_id, [schema])
     
+    @mcp.resource("pgmcp://{conn_id}/schemas/{schema}/select_tables") 
+    async def list_select_schema_tables(conn_id: str, schema: str): 
+        """List tables from a specified context table with their table descriptions.""" 
+        query = """ 
+                SELECT t.* FROM public.context_schema_table t
+        """ 
+        return await execute_query(query, conn_id)
+
+
+
+    
     @mcp.resource("pgmcp://{conn_id}/schemas/{schema}/tables/{table}/columns")
     async def get_table_columns(conn_id: str, schema: str, table: str):
         """Get columns for a specific table with their descriptions."""

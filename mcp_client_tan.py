@@ -46,7 +46,8 @@ class PostgreSQLAssistantApp:
         # Load environment variables
         dotenv.load_dotenv()
         self.db_url = os.getenv('DATABASE_URL')
-        self.pg_mcp_url = os.getenv('PG_MCP_URL', 'https://81cd-104-13-14-137.ngrok-free.app/sse')
+        # self.pg_mcp_url = os.getenv('PG_MCP_URL', 'http://10.1.4.112:8000/sse')
+        self.pg_mcp_url = os.getenv('PG_MCP_URL', 'http://172.29.241.42:8000/sse')
         self.anthropic_api_key = os.getenv('ANTHROPIC_API_KEY')
 
         if not self.anthropic_api_key:
@@ -101,7 +102,8 @@ class PostgreSQLAssistantApp:
                         schema_description = schema.get('description', '')
                         
                         # Fetch tables for this schema
-                        tables_resource = f"pgmcp://{conn_id}/schemas/{schema_name}/tables"
+                        # tables_resource = f"pgmcp://{conn_id}/schemas/{schema_name}/tables"
+                        tables_resource = f"pgmcp://{conn_id}/schemas/{schema}/select_tables" 
                         tables_response = await session.read_resource(tables_resource)
                         
                         tables_content = None
@@ -118,7 +120,7 @@ class PostgreSQLAssistantApp:
                                 # For each table, get its columns
                                 for table in tables:
                                     table_name = table.get('table_name')
-                                    table_description = table.get('description', '')
+                                    table_description = table.get('table_description', '')
                                     
                                     # Fetch columns for this table
                                     columns_resource = f"pgmcp://{conn_id}/schemas/{schema_name}/tables/{table_name}/columns"
@@ -539,7 +541,11 @@ Here is the database schema you will use:
             # Add user message to chat history
             with st.chat_message("user"):
                 st.write(query)
-                
+            
+                    # Initialize or update messages list first
+            if 'messages' not in st.session_state:
+                st.session_state.messages = []
+                    
             st.session_state.messages.append({"role": "user", "content": query})
             
             # Get available tools from the server
@@ -609,6 +615,7 @@ Here is the database schema you will use:
                                         self.fetch_schema_info(session, conn_id),
                                         timeout=20  # 20 second timeout for schema fetching
                                     )
+                                    # print(schema_info)
                                     
                                     # Only update schema info if we got valid data
                                     if schema_info:
@@ -660,31 +667,65 @@ Here is the database schema you will use:
 
             # Display the connection ID for debugging
             st.info(f"Using connection ID: {st.session_state.conn_id[:8]}... (truncated for security)")
+            messages = st.session_state.messages
+
+                    # Determine if this is the initial request or a follow-up
+            is_initial_request = True
+            for msg in st.session_state.messages:
+                # Check if any previous message was a tool result
+                if isinstance(msg.get("content"), list):
+                    for content_item in msg["content"]:
+                        if isinstance(content_item, dict) and content_item.get("type") == "tool_result":
+                            # If we find a tool result, this is not the initial request
+                            is_initial_request = False
+                            break
+                if not is_initial_request:
+                    break
 
             # Get schema information for the prompt
             # relevant_schema = extract_relevant_tables(query, st.session_state.schema_info)
             schema_text = self.format_schema_for_prompt(st.session_state.schema_info)
-            # print(relevant_schema)
             print(schema_text)
+            # print(relevant_schema)
+            # print(schema_text)
             
-            system_prompt = f"""You are a master PostgreSQL assistant with deep knowledge of SQL and database operations.
-            Before executing any query, you should use the provided schema context for the tables and fields.
-            The schema context has already been supplied and includes detailed column comments that provide context about each field and table comments about each table.
-            Do not re-fetch or verify table structures from the database. You already have the necessary schema information to execute the queries accurately.
+            # Create appropriate system prompt based on whether this is initial request
+            if is_initial_request:
+                # For initial request, include full schema information
+                schema_text = self.format_schema_for_prompt(st.session_state.schema_info)
+                system_prompt = f"""You are a master PostgreSQL assistant with deep knowledge of SQL and database operations.
+                Before executing any query, you should use the provided schema context for the tables and fields.
+                The schema context has already been supplied and includes detailed column comments that provide context about each field and table comments about each table.
+                Do not re-fetch or verify table structures from the database. You already have the necessary schema information to execute the queries accurately.
 
-            If tables are missing or if there are issues with the query, explain why the query cannot be executed based on the provided schema.
-            You are expected to leverage this context to generate more accurate and meaningful queries without querying the database for schema information.
+                If tables are missing or if there are issues with the query, explain why the query cannot be executed based on the provided schema.
+                You are expected to leverage this context to generate more accurate and meaningful queries without querying the database for schema information.
 
-            Your job is to use the tools at your disposal to execute SQL queries and provide the results to the user.
-            If a query fails, analyze the error and try a corrected version, making use of the schema context.
+                Your job is to use the tools at your disposal to execute SQL queries and provide the results to the user.
+                If a query fails, analyze the error and try a corrected version, making use of the schema context.
 
-            IMPORTANT: When using the pg_query tool, you must always provide both the query and conn_id parameters.
-            The current conn_id is: {st.session_state.conn_id}
-            Always use this exact conn_id value when making pg_query calls.
-            Never pass the connection_string to the pg_query tool.
-            """
+                IMPORTANT: When using the pg_query tool, you must always provide both the query and conn_id parameters.
+                The current conn_id is: {st.session_state.conn_id}
+                Always use this exact conn_id value when making pg_query calls.
+                Never pass the connection_string to the pg_query tool.
+                Here is the database schema you will use:
+                {schema_text}
+                """
+            else:
+                # For follow-up requests, use a minimal system prompt without schema
+                system_prompt = f"""You are a master PostgreSQL assistant with deep knowledge of SQL and database operations.
+                You already have the schema information from the previous messages.
+                
+                Your job is to use the tools at your disposal to execute SQL queries and provide the results to the user.
+                If a query fails, analyze the error and try a corrected version.
 
-            messages = st.session_state.messages
+                IMPORTANT: When using the pg_query tool, you must always provide both the query and conn_id parameters.
+                The current conn_id is: {st.session_state.conn_id}
+                Always use this exact conn_id value when making pg_query calls.
+                Never pass the connection_string to the pg_query tool.
+                """
+
+                messages = st.session_state.messages
 
             while True:
                 # Generate SQL using Claude with tools available
